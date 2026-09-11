@@ -4098,7 +4098,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                             // open timeout so it cannot fire mid-step.
                             try { timeout.cancel(); } catch {}
                             Promise.resolve(afterInsert(composeWin))
-                              .then(finish, (e) => finish({ error: e.toString() }));
+                              .then(finish)
+                              .catch((e) => finish({ error: e.toString() }));
                           } else {
                             finish({ success: true });
                           }
