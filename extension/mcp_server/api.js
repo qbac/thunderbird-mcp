@@ -6903,6 +6903,21 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   useHtml ? "text/html" : "text/plain",
                   msgToReplace
                 ).then(result => {
+                  if (result.success && msgToReplace) {
+                    // Local build: on IMAP the msgToReplace hand-off saves the new
+                    // draft but leaves the old one in Drafts (seen on TB ESR with
+                    // a nazwa.pl IMAP account), so remove it explicitly -- the
+                    // same way deleteMessages handles drafts (moved to Trash).
+                    try {
+                      const stillThere = findMessage(replaceMessageId, replaceFolderPath);
+                      if (!stillThere.error) {
+                        const removed = deleteMessages([replaceMessageId], replaceFolderPath);
+                        if (removed && removed.error) result.oldDraftRemoveError = removed.error;
+                      }
+                    } catch (e) {
+                      result.oldDraftRemoveError = e.toString();
+                    }
+                  }
                   if (result.success) {
                     let msg = msgToReplace ? "Draft replaced" : "Draft saved";
                     if (failedPaths.length > 0) msg += ` (failed to attach: ${failedPaths.join(", ")})`;
