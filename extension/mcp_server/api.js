@@ -3788,20 +3788,18 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               if (!sig) return "";
 
               const asText = sig.isHtmlSig ? htmlSignatureToPlainText(sig.content) : sig.content;
-              // Thunderbird prepends the "-- " separator unless the signature
-              // already opens with one (mail.compose.dont_add_signature_separator).
-              const hasSeparator = /^\s*--\s*$/m.test(asText.split("\n")[0] || "");
+              // Local build: no "-- " separator. Mails prepared over MCP should
+              // look like the ones this user writes by hand, where the
+              // signature follows the text directly.
 
               if (useHtml) {
                 const sigHtml = sig.isHtmlSig
                   ? formatBodyHtml(unwrapHtmlDocument(sig.content), true)
                   : formatBodyHtml(sig.content, false);
-                const separator = hasSeparator ? "" : "-- <br>";
-                return `<br><div class="moz-signature">${separator}${sigHtml}</div>`;
+                return `<br><div class="moz-signature">${sigHtml}</div>`;
               }
 
-              const separator = hasSeparator ? "" : "-- \n";
-              return `\n\n${separator}${asText}`;
+              return `\n\n${asText}`;
             }
 
             /**
