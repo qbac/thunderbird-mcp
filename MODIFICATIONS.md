@@ -7,7 +7,11 @@ Ta kopia zawiera zmiany wprowadzone przez Jakuba Cyrklafa.
 - **Wersja:** `0.7.5.1` = upstream `0.7.5` + modyfikacje poniżej (czwarta cyfra = numer lokalnej modyfikacji).
 - **Nazwa w Thunderbirdzie:** „Thunderbird MCP (mod. Jakub Cyrklaf)”.
 - **ID dodatku bez zmian** (`thunderbird-mcp@tkasperczyk.dev`) — dzięki temu instalacja zastępuje poprzednią wersję, a ustawienia (token, dostęp do kont) zostają.
-- **Gałąź:** `feat/reply-save-draft` (na bazie `origin/main`).
+- **Gałąź:** lokalnie `feat/reply-save-draft` (na bazie `origin/main`), na GitHubie [`qbac/thunderbird-mcp` → `cyrklaf-mod`](https://github.com/qbac/thunderbird-mcp/tree/cyrklaf-mod).
+- **Zgłoszone do autora:**
+  - `saveAsDraft` → PR [#208](https://github.com/TKasperczyk/thunderbird-mcp/pull/208) (zamyka zgłoszenie #207; gałąź `feat/reply-save-as-draft` w forku).
+  - Poprawka Windows → już zgłoszona przez kogoś innego jako PR [#206](https://github.com/TKasperczyk/thunderbird-mcp/pull/206) (nie dublujemy).
+  - Gdy oba zostaną przyjęte i wydane, można wrócić do oryginalnej wtyczki z auto-aktualizacją (zainstalować XPI autora; zmienią się nazwa i wersja, ID zostaje to samo).
 
 ## Lista zmian
 
