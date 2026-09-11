@@ -1,8 +1,9 @@
 {
   "manifest_version": 2,
-  "name": "Thunderbird MCP",
-  "version": "0.7.5",
-  "description": "MCP server for AI assistants to access email, contacts, and calendars",
+  "name": "Thunderbird MCP (mod. Jakub Cyrklaf)",
+  "version": "0.7.5.1",
+  "description": "MCP server for AI assistants to access email, contacts, and calendars. Modified build by Jakub Cyrklaf based on Thunderbird MCP by Tomasz Kasperczyk.",
+  "author": "Tomasz Kasperczyk; modifications: Jakub Cyrklaf",
   "browser_specific_settings": {
     "gecko": {
       "id": "thunderbird-mcp@tkasperczyk.dev",

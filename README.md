@@ -1,5 +1,9 @@
 # Thunderbird MCP
 
+> **Wersja zmodyfikowana (0.7.5.1) — Jakub Cyrklaf.** Oparta na oryginale
+> [TKasperczyk/thunderbird-mcp](https://github.com/TKasperczyk/thunderbird-mcp) (Tomasz Kasperczyk, MIT).
+> Lista zmian i procedura aktualizacji: [`MODIFICATIONS.md`](MODIFICATIONS.md).
+
 [![CI](https://github.com/TKasperczyk/thunderbird-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/TKasperczyk/thunderbird-mcp/actions/workflows/ci.yml)
 [![Tools](https://img.shields.io/badge/40_Tools-email%2C_compose%2C_filters%2C_calendar%2C_contacts-blue.svg)](#what-you-can-do)
 [![Localhost Only](https://img.shields.io/badge/Privacy-localhost_only-green.svg)](#security)
