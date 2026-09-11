@@ -1193,7 +1193,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
           properties: {
             to: { type: "string", description: "Recipient email address" },
             subject: { type: "string", description: "Email subject line" },
-            body: { type: "string", description: "Email body text" },
+            body: { type: "string", description: "Email body text. With skipReview the identity signature is appended at the end, or placed where a <!--signature--> marker appears in the body." },
             cc: { type: "string", description: "CC recipients (comma-separated)" },
             bcc: { type: "string", description: "BCC recipients (comma-separated)" },
             isHtml: { type: "boolean", description: "Set to true if body contains HTML markup (default: false)" },
@@ -1240,7 +1240,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             replaceFolderPath: { type: "string", description: "Folder URI holding the draft named by replaceMessageId (from searchMessages). Required whenever replaceMessageId is set -- the lookup is folder-scoped, it does not search all folders." },
             to: { type: "string", description: "Recipient email address(es), comma-separated. Optional -- a draft can have no recipient." },
             subject: { type: "string", description: "Email subject line (optional)" },
-            body: { type: "string", description: "Email body (optional)" },
+            body: { type: "string", description: "Email body (optional). The identity signature is appended at the end, or placed where a <!--signature--> marker appears in the body (e.g. between an intro and forwarded content)." },
             cc: { type: "string", description: "CC recipients (comma-separated)" },
             bcc: { type: "string", description: "BCC recipients (comma-separated)" },
             isHtml: { type: "boolean", description: "Set to true if body contains HTML markup (default: false)" },
@@ -1507,6 +1507,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             from: { type: "string", description: "Sender identity (email address or identity ID from listAccounts)" },
             skipReview: { type: "boolean", description: "Request direct sending without a compose window. Honored only when the user explicitly disables the default-on skipReview safety block (default: false)." },
             saveAsDraft: { type: "boolean", description: "Build the reply in Thunderbird's native reply window (quote, identity signature, threading headers), save it to the identity's Drafts folder and close the window without sending (default: false). Cannot be combined with skipReview." },
+            subject: { type: "string", description: "Override the subject (default: Thunderbird's \"Re: <original subject>\"). Threading headers are kept, so the reply stays in the thread." },
             attachments: {
               type: "array",
               maxItems: MAX_ATTACHMENTS_PER_MESSAGE,
@@ -3027,6 +3028,21 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
              * The "message saved to Drafts" alert is suppressed for the duration
              * of the save so it cannot block the MCP call.
              */
+            /**
+             * Overrides the subject of an open compose window. Thunderbird reads
+             * the #msgSubject field into compFields on save/send, so setting the
+             * field is enough; compFields and the window title are kept in sync.
+             */
+            function setComposeWindowSubject(composeWin, subject) {
+              const subjectField = composeWin.document?.getElementById("msgSubject");
+              if (subjectField) subjectField.value = subject;
+              try { composeWin.gMsgCompose.compFields.subject = subject; } catch {}
+              try {
+                if (typeof composeWin.SetComposeWindowTitle === "function") composeWin.SetComposeWindowTitle();
+              } catch {}
+              if ("gContentChanged" in composeWin) composeWin.gContentChanged = true;
+            }
+
             function saveComposeWindowAsDraft(composeWin, identity) {
               return new Promise((resolve) => {
                 const SAVE_TIMEOUT_MS = 60000;
@@ -3821,11 +3837,27 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             function buildBodyWithSignature(body, identity, useHtml, isHtml) {
               const sigFragment = buildSignatureFragment(identity, useHtml);
 
+              // Local build: a <!--signature--> marker in the body places the
+              // signature there instead of at the very end -- e.g. between the
+              // intro and a forwarded original sent through sendMail/saveDraft.
+              // Only the first marker is used; without a signature it is dropped.
+              const SIGNATURE_MARKER_RE = /<!--\s*signature\s*-->/i;
+
               if (!useHtml) {
-                return (body || "") + sigFragment;
+                const text = body || "";
+                if (SIGNATURE_MARKER_RE.test(text)) {
+                  return text.replace(SIGNATURE_MARKER_RE, () => sigFragment.replace(/^\n+/, "\n"));
+                }
+                return text + sigFragment;
               }
 
               const formatted = formatBodyHtml(body, isHtml);
+              if (SIGNATURE_MARKER_RE.test(formatted)) {
+                const placed = formatted.replace(SIGNATURE_MARKER_RE, () => sigFragment);
+                return isHtml && placed.includes('<html')
+                  ? placed
+                  : `<html><head><meta charset="UTF-8"></head><body>${placed}</body></html>`;
+              }
               if (isHtml && formatted.includes('<html')) {
                 if (!sigFragment) return formatted;
                 return /<\/body>/i.test(formatted)
@@ -6896,7 +6928,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
              * saveAsDraft runs the same native review flow, then saves the reply
              * to Drafts and closes the window instead of leaving it open.
              */
-	            function replyToMessage(messageId, folderPath, body, replyAll, isHtml, to, cc, bcc, from, attachments, skipReview, saveAsDraft) {
+	            function replyToMessage(messageId, folderPath, body, replyAll, isHtml, to, cc, bcc, from, attachments, skipReview, saveAsDraft, subject) {
 	              return new Promise((resolve) => {
 	                try {
 	                  if (skipReview && saveAsDraft) {
@@ -6977,7 +7009,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	                        composeFields.bcc = bcc || "";
 
 	                        const origSubject = msgHdr.mime2DecodedSubject || msgHdr.subject || "";
-	                        composeFields.subject = /^re:/i.test(origSubject) ? origSubject : `Re: ${origSubject}`;
+	                        composeFields.subject = subject
+	                          ? subject
+	                          : (/^re:/i.test(origSubject) ? origSubject : `Re: ${origSubject}`);
 	                        composeFields.references = `<${messageId}>`;
 	                        composeFields.setHeader("In-Reply-To", `<${messageId}>`);
 
@@ -7036,8 +7070,13 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	                    reviewCc,
 	                    bcc,
 	                    fileDescs,
-	                    saveAsDraft
-	                      ? (composeWin) => saveComposeWindowAsDraft(composeWin, msgComposeParams.identity)
+	                    (subject || saveAsDraft)
+	                      ? (composeWin) => {
+	                          if (subject) setComposeWindowSubject(composeWin, subject);
+	                          return saveAsDraft
+	                            ? saveComposeWindowAsDraft(composeWin, msgComposeParams.identity)
+	                            : { success: true };
+	                        }
 	                      : undefined
 	                  ).then(result => {
 	                    if (result.success) {
@@ -8594,7 +8633,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 case "saveDraft":
                   return await saveDraft(args.to, args.subject, args.body, args.cc, args.bcc, args.isHtml, args.from, args.attachments, args.replaceMessageId, args.replaceFolderPath);
                 case "replyToMessage":
-                  return await replyToMessage(args.messageId, args.folderPath, args.body, args.replyAll, args.isHtml, args.to, args.cc, args.bcc, args.from, args.attachments, args.skipReview, args.saveAsDraft);
+                  return await replyToMessage(args.messageId, args.folderPath, args.body, args.replyAll, args.isHtml, args.to, args.cc, args.bcc, args.from, args.attachments, args.skipReview, args.saveAsDraft, args.subject);
                 case "forwardMessage":
                   return await forwardMessage(args.messageId, args.folderPath, args.to, args.body, args.isHtml, args.cc, args.bcc, args.from, args.attachments, args.skipReview);
                 case "getRecentMessages":
