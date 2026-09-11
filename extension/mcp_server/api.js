@@ -1490,7 +1490,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
         name: "replyToMessage",
         group: "messages", crud: "create",
         title: "Reply to Message",
-        description: "Reply in a compose window with quoted original text for review. The skipReview safety block is on by default; direct sending is honored only when the user explicitly disables that preference.",
+        description: "Reply in a compose window with quoted original text for review, or save the reply straight to Drafts with saveAsDraft. The skipReview safety block is on by default; direct sending is honored only when the user explicitly disables that preference.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1504,6 +1504,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             bcc: { type: "string", description: "BCC recipients (comma-separated)" },
             from: { type: "string", description: "Sender identity (email address or identity ID from listAccounts)" },
             skipReview: { type: "boolean", description: "Request direct sending without a compose window. Honored only when the user explicitly disables the default-on skipReview safety block (default: false)." },
+            saveAsDraft: { type: "boolean", description: "Build the reply in Thunderbird's native reply window (quote, identity signature, threading headers), save it to the identity's Drafts folder and close the window without sending (default: false). Cannot be combined with skipReview." },
             attachments: {
               type: "array",
               maxItems: MAX_ATTACHMENTS_PER_MESSAGE,
@@ -2159,19 +2160,25 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 // the connection file. The O_EXCL on the file itself blocks a
                 // straight overwrite, but a permissive directory still lets the
                 // attacker read or rename our file. Force perms back to 0o700.
-                // permissions is 0 on platforms that don't expose POSIX modes
-                // (Windows ACLs), so the chmod is a no-op there.
-                try {
-                  const mode = tmpDir.permissions;
-                  if (mode && (mode & 0o077) !== 0) {
-                    try { tmpDir.permissions = 0o700; } catch { /* best-effort */ }
-                    if ((tmpDir.permissions & 0o077) !== 0) {
-                      throw new Error("thunderbird-mcp tmp directory has group/world permissions — refusing to write connection info");
+                // Windows has no equivalent shared-/tmp threat model: the per-user
+                // %TEMP% dir is already ACL-restricted to SYSTEM/Administrators/the
+                // owner, and nsIFile.permissions on Windows is a synthetic POSIX
+                // view (writable => 0777, read-only => 0555) that can never settle
+                // at 0700 — chmod always reports group/world bits regardless of
+                // real ACLs, so this branch would permanently false-positive there.
+                if (Services.appinfo.OS !== "WINNT") {
+                  try {
+                    const mode = tmpDir.permissions;
+                    if (mode && (mode & 0o077) !== 0) {
+                      try { tmpDir.permissions = 0o700; } catch { /* best-effort */ }
+                      if ((tmpDir.permissions & 0o077) !== 0) {
+                        throw new Error("thunderbird-mcp tmp directory has group/world permissions — refusing to write connection info");
+                      }
                     }
+                  } catch (e) {
+                    if (e && e.message && e.message.startsWith("thunderbird-mcp tmp directory")) throw e;
+                    // ignore: permissions accessor unsupported on this platform
                   }
-                } catch (e) {
-                  if (e && e.message && e.message.startsWith("thunderbird-mcp tmp directory")) throw e;
-                  // ignore: permissions accessor unsupported on this platform
                 }
               }
               const connFile = tmpDir.clone();
@@ -3008,7 +3015,99 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               return compType === Ci.nsIMsgCompType.ForwardInline;
             }
 
-            function openComposeWindowWithCustomizations(msgComposeParams, originalMsgURI, compType, identity, body, isHtml, to, cc, bcc, attachDescs) {
+            /**
+             * Saves an open compose window to the identity's Drafts folder via
+             * Thunderbird's own SaveAsDraft command, then lets TB close the
+             * window (gCloseWindowAfterSave -- the same path as "Save" in the
+             * close prompt). Going through the compose window keeps the native
+             * reply quote, identity signature and References/In-Reply-To.
+             *
+             * The "message saved to Drafts" alert is suppressed for the duration
+             * of the save so it cannot block the MCP call.
+             */
+            function saveComposeWindowAsDraft(composeWin, identity) {
+              return new Promise((resolve) => {
+                const SAVE_TIMEOUT_MS = 60000;
+                const RESTORE_DIALOG_PREF_DELAY_MS = 10000;
+                let settled = false;
+                let dialogPrefRestored = false;
+                let previousShowSaveMsgDlg = null;
+
+                try {
+                  previousShowSaveMsgDlg = identity.showSaveMsgDlg;
+                  identity.showSaveMsgDlg = false;
+                } catch {
+                  previousShowSaveMsgDlg = null;
+                }
+
+                const restoreDialogPref = () => {
+                  if (dialogPrefRestored) return;
+                  dialogPrefRestored = true;
+                  if (previousShowSaveMsgDlg === null) return;
+                  try { identity.showSaveMsgDlg = previousShowSaveMsgDlg; } catch {}
+                };
+
+                const compose = composeWin.gMsgCompose;
+                const timer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
+
+                const stateListener = {
+                  QueryInterface: ChromeUtils.generateQI(["nsIMsgComposeStateListener"]),
+                  NotifyComposeFieldsReady() {},
+                  NotifyComposeBodyReady() {},
+                  // TB's own listener (registered first) reads showSaveMsgDlg
+                  // here, so restoring afterwards is safe.
+                  SaveInFolderDone() {
+                    restoreDialogPref();
+                  },
+                  ComposeProcessDone(aResult) {
+                    if (Components.isSuccessCode(aResult)) {
+                      settle({ success: true });
+                    } else {
+                      settle({ error: `Saving reply draft failed (status 0x${(aResult >>> 0).toString(16)})` });
+                    }
+                  },
+                };
+
+                const settle = (result) => {
+                  if (settled) return;
+                  settled = true;
+                  try { timer.cancel(); } catch {}
+                  try { compose?.UnregisterStateListener(stateListener); } catch {}
+                  if (!dialogPrefRestored) {
+                    // SaveInFolderDone may still be pending; restore a bit later
+                    // so the alert stays suppressed for this save.
+                    const restoreTimer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
+                    restoreTimer.initWithCallback({ notify() { restoreDialogPref(); } },
+                      RESTORE_DIALOG_PREF_DELAY_MS, Ci.nsITimer.TYPE_ONE_SHOT);
+                  }
+                  resolve(result);
+                };
+
+                timer.initWithCallback({
+                  notify() {
+                    settle({ error: "Timed out saving reply draft; the compose window was left open" });
+                  }
+                }, SAVE_TIMEOUT_MS, Ci.nsITimer.TYPE_ONE_SHOT);
+
+                try {
+                  if (!compose || typeof composeWin.SaveAsDraft !== "function") {
+                    settle({ error: "Compose window does not support SaveAsDraft" });
+                    return;
+                  }
+                  compose.RegisterStateListener(stateListener);
+                  composeWin.gCloseWindowAfterSave = true;
+                  Promise.resolve(composeWin.SaveAsDraft()).catch((e) => {
+                    try { composeWin.gCloseWindowAfterSave = false; } catch {}
+                    settle({ error: e.toString() });
+                  });
+                } catch (e) {
+                  try { composeWin.gCloseWindowAfterSave = false; } catch {}
+                  settle({ error: e.toString() });
+                }
+              });
+            }
+
+            function openComposeWindowWithCustomizations(msgComposeParams, originalMsgURI, compType, identity, body, isHtml, to, cc, bcc, attachDescs, afterInsert) {
               return new Promise((resolve) => {
                 const OPEN_TIMEOUT_MS = shouldUseDirectComposeOpen(compType) ? 60000 : 15000;
                 let settled = false;
@@ -3080,7 +3179,15 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                           applyComposeRecipientOverrides(composeWin, identity, to, cc, bcc);
                           insertReplyBodyIntoComposeWindow(composeWin, body, isHtml);
                           addAttachmentsToComposeWindow(composeWin, attachDescs);
-                          finish({ success: true });
+                          if (typeof afterInsert === "function") {
+                            // The follow-up step owns its own timeout; stop the
+                            // open timeout so it cannot fire mid-step.
+                            try { timeout.cancel(); } catch {}
+                            Promise.resolve(afterInsert(composeWin))
+                              .then(finish, (e) => finish({ error: e.toString() }));
+                          } else {
+                            finish({ success: true });
+                          }
                         } catch (e) {
                           finish({ error: e.toString() });
                         }
@@ -6595,10 +6702,17 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
              * to user preferences, and set threading headers/disposition flags.
              * skipReview still uses direct send, so it keeps a manual quoted body
              * and manually marks the original as replied after a successful send.
+             *
+             * saveAsDraft runs the same native review flow, then saves the reply
+             * to Drafts and closes the window instead of leaving it open.
              */
-	            function replyToMessage(messageId, folderPath, body, replyAll, isHtml, to, cc, bcc, from, attachments, skipReview) {
+	            function replyToMessage(messageId, folderPath, body, replyAll, isHtml, to, cc, bcc, from, attachments, skipReview, saveAsDraft) {
 	              return new Promise((resolve) => {
 	                try {
+	                  if (skipReview && saveAsDraft) {
+	                    resolve({ error: "saveAsDraft cannot be combined with skipReview" });
+	                    return;
+	                  }
 	                  if (skipReview && isSkipReviewBlocked()) {
 	                    resolve({ error: "User preference blocks skipReview. Retry with skipReview: false (or omitted) to open the review window instead." });
 	                    return;
@@ -6731,10 +6845,13 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	                    reviewTo,
 	                    reviewCc,
 	                    bcc,
-	                    fileDescs
+	                    fileDescs,
+	                    saveAsDraft
+	                      ? (composeWin) => saveComposeWindowAsDraft(composeWin, msgComposeParams.identity)
+	                      : undefined
 	                  ).then(result => {
 	                    if (result.success) {
-	                      let msg = "Reply window opened";
+	                      let msg = saveAsDraft ? "Reply saved as draft" : "Reply window opened";
 	                      if (failedPaths.length > 0) msg += ` (failed to attach: ${failedPaths.join(", ")})`;
 	                      result.message = msg;
 	                    }
@@ -8286,7 +8403,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 case "saveDraft":
                   return await saveDraft(args.to, args.subject, args.body, args.cc, args.bcc, args.isHtml, args.from, args.attachments);
                 case "replyToMessage":
-                  return await replyToMessage(args.messageId, args.folderPath, args.body, args.replyAll, args.isHtml, args.to, args.cc, args.bcc, args.from, args.attachments, args.skipReview);
+                  return await replyToMessage(args.messageId, args.folderPath, args.body, args.replyAll, args.isHtml, args.to, args.cc, args.bcc, args.from, args.attachments, args.skipReview, args.saveAsDraft);
                 case "forwardMessage":
                   return await forwardMessage(args.messageId, args.folderPath, args.to, args.body, args.isHtml, args.cc, args.bcc, args.from, args.attachments, args.skipReview);
                 case "getRecentMessages":
