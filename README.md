@@ -1,6 +1,6 @@
 # Thunderbird MCP
 
-> **Wersja zmodyfikowana (0.7.5.4) — Jakub Cyrklaf.** Oparta na oryginale
+> **Wersja zmodyfikowana (0.7.5.5) — Jakub Cyrklaf.** Oparta na oryginale
 > [TKasperczyk/thunderbird-mcp](https://github.com/TKasperczyk/thunderbird-mcp) (Tomasz Kasperczyk, MIT).
 > Lista zmian i procedura aktualizacji: [`MODIFICATIONS.md`](MODIFICATIONS.md).
 
@@ -70,7 +70,7 @@ The Thunderbird extension embeds a local HTTP server with session-scoped auth to
 | `replyToMessage` | Reply with quoted original and proper threading -- `skipReview` is subject to the same safety block; `saveAsDraft` saves the threaded reply to Drafts without sending; `subject` overrides the "Re:" subject |
 | `forwardMessage` | Forward with all original attachments preserved -- `skipReview` is subject to the same safety block |
 
-All compose tools open a window for you to review and edit before sending by default. The **Block `skipReview`** preference is on by default, so `skipReview: true` is rejected until you explicitly disable the preference; only then can it send directly. Attachments can be file paths or inline base64 objects.
+All compose tools open a window for you to review and edit before sending by default. The **Block `skipReview`** preference is on by default, so `skipReview: true` is rejected until you explicitly disable the preference; only then can it send directly. Attachments can be file paths or inline base64 objects. `sendMail`, `saveDraft` and `replyToMessage` also accept `inlineImages` -- images embedded in the HTML body as `multipart/related` parts with a Content-ID (not attachments), referenced from the body as `<img src="cid:...">`.
 
 Compose tools validate the `from` identity strictly -- if the specified sender doesn't match any configured Thunderbird identity, the tool returns an error instead of silently substituting another account.
 

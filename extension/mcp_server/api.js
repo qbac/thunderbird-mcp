@@ -738,6 +738,174 @@ const MAX_FILE_PATH_ATTACHMENT_BYTES = 50 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES = 50 * 1024 * 1024;
 const MAX_ATTACHMENTS_PER_MESSAGE = 20;
 // END OUTBOUND ATTACHMENT LIMITS
+// BEGIN OUTBOUND INLINE IMAGE HELPERS
+// Local build: images embedded in the HTML body of saveDraft / sendMail /
+// replyToMessage as multipart/related parts with a Content-ID, referenced from
+// the body as <img src="cid:...">. These helpers are pure (no XPCOM) so the
+// planning and body rewriting can be tested outside Thunderbird.
+const OUTBOUND_INLINE_IMAGE_TYPES_BY_EXT = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  bmp: "image/bmp",
+  svg: "image/svg+xml",
+};
+// RFC 5322 atext plus "." and "@": what a msg-id / Content-ID may carry
+// without quoting. Rules out spaces, quotes and angle brackets, so a cid can
+// never break out of the src attribute or the Content-ID header.
+const OUTBOUND_CONTENT_ID_PATTERN = /^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~.@]{1,200}$/;
+const OUTBOUND_INLINE_IMAGES_SCHEMA = {
+  type: "array",
+  maxItems: MAX_ATTACHMENTS_PER_MESSAGE,
+  description: "Images embedded IN the HTML body (multipart/related parts with a Content-ID, not attachments). Reference each one from body as <img src=\"cid:<cid>\">; every image must be referenced and isHtml must be true. Prefer path over base64 -- the file is read by Thunderbird, so no image data passes through the tool call.",
+  items: {
+    type: "object",
+    properties: {
+      cid: { type: "string", minLength: 1, description: "Content-ID used in the body as cid:<cid>, e.g. \"screen1.png\" (no spaces, quotes or angle brackets). Defaults to name, or the file name of path." },
+      name: { type: "string", minLength: 1, description: "File name of the embedded part (defaults to the file name of path, or cid)" },
+      contentType: { type: "string", description: "image/* MIME type; guessed from the name extension when omitted" },
+      path: { type: "string", minLength: 1, description: "Absolute path of the image file (same security checks as file attachments)" },
+      base64: { type: "string", minLength: 1, contentEncoding: "base64", description: "Base64-encoded image content (alternative to path)" },
+      content: { type: "string", minLength: 1, contentEncoding: "base64", description: "Alias for base64" },
+    },
+    anyOf: [
+      { type: "object", required: ["path"] },
+      { type: "object", required: ["base64"] },
+      { type: "object", required: ["content"] },
+    ],
+    additionalProperties: false,
+  },
+};
+
+function normalizeOutboundContentId(raw) {
+  let cid = String(raw ?? "").trim();
+  cid = cid.replace(/^cid:/i, "");
+  if (cid.startsWith("<") && cid.endsWith(">")) cid = cid.slice(1, -1);
+  return OUTBOUND_CONTENT_ID_PATTERN.test(cid) ? cid : null;
+}
+
+function guessOutboundImageContentType(name) {
+  const ext = (String(name || "").match(/\.([A-Za-z0-9]+)$/)?.[1] || "").toLowerCase();
+  return OUTBOUND_INLINE_IMAGE_TYPES_BY_EXT[ext] || "";
+}
+
+function outboundFileLeafName(filePath) {
+  return String(filePath || "").split(/[\\/]/).pop() || "";
+}
+
+/**
+ * Turns inlineImages entries ({cid?, name?, contentType?, base64|content|path})
+ * into attachment entries understood by filePathsToAttachDescs, keyed by cid.
+ * Returns { plan: [{cid, name, contentType, entry}], errors: string[] }.
+ * Any error means the whole call must be rejected: a silently dropped image
+ * would leave a broken <img> in a message the user believes is complete.
+ */
+function planOutboundInlineImages(inlineImages) {
+  const plan = [];
+  const errors = [];
+  if (inlineImages == null) return { plan, errors };
+  if (!Array.isArray(inlineImages)) {
+    errors.push("inlineImages must be an array");
+    return { plan, errors };
+  }
+  const seen = new Set();
+  inlineImages.forEach((img, index) => {
+    const label = `inlineImages[${index}]`;
+    if (!img || typeof img !== "object") {
+      errors.push(`${label}: expected an object`);
+      return;
+    }
+    const data = img.base64 || img.content;
+    const hasPath = typeof img.path === "string" && img.path.length > 0;
+    if (!data && !hasPath) {
+      errors.push(`${label}: one of base64 or path is required`);
+      return;
+    }
+    if (data && hasPath) {
+      errors.push(`${label}: pass either base64 or path, not both`);
+      return;
+    }
+    const name = img.name || (hasPath ? outboundFileLeafName(img.path) : "") || (img.cid ? String(img.cid) : "");
+    const cid = normalizeOutboundContentId(img.cid ?? name);
+    if (!cid) {
+      errors.push(`${label}: invalid cid ${JSON.stringify(img.cid ?? name)} (letters, digits and . @ - _ + = etc.; no spaces, quotes or angle brackets)`);
+      return;
+    }
+    const cidKey = cid.toLowerCase();
+    if (seen.has(cidKey)) {
+      errors.push(`${label}: duplicate cid "${cid}"`);
+      return;
+    }
+    seen.add(cidKey);
+    const contentType = (img.contentType ? String(img.contentType).split(";")[0].trim().toLowerCase() : "")
+      || guessOutboundImageContentType(name)
+      || (hasPath ? guessOutboundImageContentType(img.path) : "");
+    if (!contentType) {
+      errors.push(`${label}: contentType is required when the name has no image extension (.png, .jpg, ...)`);
+      return;
+    }
+    if (!contentType.startsWith("image/")) {
+      errors.push(`${label}: contentType must be image/*, got ${contentType}`);
+      return;
+    }
+    const safeName = name || `${cid.replace(/[^A-Za-z0-9._-]/g, "_")}`;
+    const entry = hasPath ? img.path : { name: safeName, contentType, base64: data };
+    plan.push({ cid, name: safeName, contentType, entry });
+  });
+  return { plan, errors };
+}
+
+function escapeRegExpLiteral(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Matches cid:<cid> as a whole URL (the next char must end the URL), so
+// "cid:a.png" does not match inside "cid:a.png2".
+function outboundCidReferencePattern(cid) {
+  return new RegExp(`cid:${escapeRegExpLiteral(cid)}(?=$|["'\\s)>&#?])`, "gi");
+}
+
+function findUnreferencedContentIds(body, cids) {
+  const text = String(body || "");
+  return cids.filter(cid => !outboundCidReferencePattern(cid).test(text));
+}
+
+// btoa is not defined in the experiment API scope Thunderbird runs this file
+// in (the same reason the attachment decoder carries a manual atob fallback),
+// so encode by hand. Takes a byte array (Uint8Array or number[]).
+const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+function encodeBytesToBase64(bytes) {
+  const parts = [];
+  let chunk = "";
+  const len = bytes.length;
+  for (let i = 0; i < len; i += 3) {
+    const a = bytes[i];
+    const b = i + 1 < len ? bytes[i + 1] : 0;
+    const c = i + 2 < len ? bytes[i + 2] : 0;
+    chunk += BASE64_ALPHABET[a >> 2]
+      + BASE64_ALPHABET[((a & 3) << 4) | (b >> 4)]
+      + (i + 1 < len ? BASE64_ALPHABET[((b & 15) << 2) | (c >> 6)] : "=")
+      + (i + 2 < len ? BASE64_ALPHABET[c & 63] : "=");
+    if (chunk.length >= 65536) {
+      parts.push(chunk);
+      chunk = "";
+    }
+  }
+  parts.push(chunk);
+  return parts.join("");
+}
+
+/** Replaces every cid:<cid> reference in body with urlsByCid[cid]. */
+function replaceContentIdReferences(body, urlsByCid) {
+  let text = String(body || "");
+  for (const [cid, url] of Object.entries(urlsByCid)) {
+    text = text.replace(outboundCidReferencePattern(cid), () => url);
+  }
+  return text;
+}
+// END OUTBOUND INLINE IMAGE HELPERS
 // Must be large enough to carry MAX_BASE64_SIZE plus JSON-RPC framing overhead.
 // The httpd.sys.mjs pre-buffer cap uses the same value.
 const MAX_REQUEST_BODY = 32 * 1024 * 1024; // 32 MB limit for incoming HTTP request bodies
@@ -1199,6 +1367,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             isHtml: { type: "boolean", description: "Set to true if body contains HTML markup (default: false)" },
             from: { type: "string", description: "Sender identity (email address or identity ID from listAccounts)" },
             skipReview: { type: "boolean", description: "Request direct sending without a compose window. Honored only when the user explicitly disables the default-on skipReview safety block (default: false)." },
+            inlineImages: OUTBOUND_INLINE_IMAGES_SCHEMA,
             attachments: {
               type: "array",
               maxItems: MAX_ATTACHMENTS_PER_MESSAGE,
@@ -1245,6 +1414,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             bcc: { type: "string", description: "BCC recipients (comma-separated)" },
             isHtml: { type: "boolean", description: "Set to true if body contains HTML markup (default: false)" },
             from: { type: "string", description: "Sender identity (email address or identity ID from listAccounts)" },
+            inlineImages: OUTBOUND_INLINE_IMAGES_SCHEMA,
             attachments: {
               type: "array",
               maxItems: MAX_ATTACHMENTS_PER_MESSAGE,
@@ -1508,6 +1678,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             skipReview: { type: "boolean", description: "Request direct sending without a compose window. Honored only when the user explicitly disables the default-on skipReview safety block (default: false)." },
             saveAsDraft: { type: "boolean", description: "Build the reply in Thunderbird's native reply window (quote, identity signature, threading headers), save it to the identity's Drafts folder and close the window without sending (default: false). Cannot be combined with skipReview." },
             subject: { type: "string", description: "Override the subject (default: Thunderbird's \"Re: <original subject>\"). Threading headers are kept, so the reply stays in the thread." },
+            inlineImages: OUTBOUND_INLINE_IMAGES_SCHEMA,
             attachments: {
               type: "array",
               maxItems: MAX_ATTACHMENTS_PER_MESSAGE,
@@ -2797,6 +2968,78 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               return result;
             }
 
+            /**
+             * Local build: resolves the inlineImages argument into embedded
+             * image descriptors ({cid, desc}) for a message whose body is
+             * `body`. Strict by design -- returns { error } when any image
+             * cannot be used, when the message is not HTML, or when the body
+             * does not reference an image as cid:<cid>. Temp files for base64
+             * images are written by filePathsToAttachDescs (same security
+             * checks and limits as ordinary attachments).
+             */
+            function resolveOutboundInlineImages(inlineImages, body, bodyIsHtml, attachDescs) {
+              if (inlineImages == null || (Array.isArray(inlineImages) && inlineImages.length === 0)) {
+                return { embedded: [] };
+              }
+              if (!bodyIsHtml) {
+                return { error: "inlineImages require an HTML message -- pass isHtml: true" };
+              }
+              const { plan, errors } = planOutboundInlineImages(inlineImages);
+              if (errors.length > 0) return { error: errors.join("; ") };
+              if (plan.length + (attachDescs?.length || 0) > MAX_ATTACHMENTS_PER_MESSAGE) {
+                return { error: `attachments + inlineImages exceed the ${MAX_ATTACHMENTS_PER_MESSAGE} part limit` };
+              }
+              const unreferenced = findUnreferencedContentIds(body, plan.map(p => p.cid));
+              if (unreferenced.length > 0) {
+                return { error: `inlineImages not referenced in body: ${unreferenced.map(c => `cid:${c}`).join(", ")} -- use <img src="cid:${unreferenced[0]}"> in an HTML body` };
+              }
+              const { descs, failed } = filePathsToAttachDescs(plan.map(p => p.entry));
+              if (failed.length > 0 || descs.length !== plan.length) {
+                return { error: `inlineImages could not be read: ${failed.join(", ") || "unknown error"}` };
+              }
+              let totalBytes = (attachDescs || []).reduce((sum, d) => sum + (d.size || 0), 0);
+              const embedded = plan.map((p, i) => {
+                const desc = descs[i];
+                desc.name = p.name;
+                desc.contentType = p.contentType;
+                totalBytes += desc.size || 0;
+                return { cid: p.cid, desc };
+              });
+              if (totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
+                return { error: `attachments + inlineImages exceed the ${MAX_TOTAL_ATTACHMENT_BYTES / 1024 / 1024}MB aggregate limit` };
+              }
+              return { embedded };
+            }
+
+            /**
+             * Local build: for paths that go through a real compose window
+             * (review window, replyToMessage saveAsDraft) the body is loaded
+             * into Thunderbird's editor. There images live as data: URLs --
+             * the same form "Insert > Image" and paste produce -- and TB turns
+             * them into multipart/related cid: parts itself on save/send.
+             */
+            function inlineImagesAsDataUrls(body, embedded) {
+              if (!embedded || embedded.length === 0) return body;
+              const urlsByCid = {};
+              for (const { cid, desc } of embedded) {
+                const file = Services.io.newURI(desc.url).QueryInterface(Ci.nsIFileURL).file;
+                const fstream = Cc["@mozilla.org/network/file-input-stream;1"]
+                  .createInstance(Ci.nsIFileInputStream);
+                const bstream = Cc["@mozilla.org/binaryinputstream;1"]
+                  .createInstance(Ci.nsIBinaryInputStream);
+                try {
+                  fstream.init(file, -1, 0, 0);
+                  bstream.setInputStream(fstream);
+                  const bytes = bstream.readByteArray(bstream.available());
+                  urlsByCid[cid] = `data:${desc.contentType};filename=${encodeURIComponent(desc.name)};base64,${encodeBytesToBase64(bytes)}`;
+                } finally {
+                  try { bstream.close(); } catch { /* already closed */ }
+                  try { fstream.close(); } catch { /* already closed */ }
+                }
+              }
+              return replaceContentIdReferences(body, urlsByCid);
+            }
+
             function addAttachmentsToComposeWindow(composeWin, attachDescs) {
               if (!composeWin) {
                 console.warn("thunderbird-mcp: skipping attachment add — no compose window");
@@ -3291,9 +3534,40 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
              * We try the modern 16-arg call first; if TB throws
              * NS_ERROR_XPC_NOT_ENOUGH_ARGS, fall back to the legacy 18-arg call.
              */
-            function sendMessageDirectly(composeFields, identity, attachDescs, originalMsgURI, compType, deliverMode, bodyType, msgToReplace) {
+            function sendMessageDirectly(composeFields, identity, attachDescs, originalMsgURI, compType, deliverMode, bodyType, msgToReplace, embeddedImages) {
               if (!identity) {
                 return Promise.resolve({ error: "No identity available for direct send" });
+              }
+
+              // Local build: embedded (cid:) images. nsIMsgSend has no public
+              // way to hand over related parts -- MessageSend collects them
+              // only from a live editor (_gatherEmbeddedAttachments). Without a
+              // compose window we instantiate the JS MessageSend (TB 128+)
+              // directly and supply the parts in place of that editor scan;
+              // MimeMessage then builds multipart/related with Content-ID and
+              // Content-Disposition: inline, exactly as for images pasted in
+              // the compose window.
+              let embeddedMsgSend = null;
+              if (embeddedImages && embeddedImages.length > 0) {
+                try {
+                  const { MessageSend } = ChromeUtils.importESModule("resource:///modules/MessageSend.sys.mjs");
+                  embeddedMsgSend = new MessageSend();
+                  if (typeof embeddedMsgSend._gatherEmbeddedAttachments !== "function") {
+                    throw new Error("MessageSend._gatherEmbeddedAttachments not found");
+                  }
+                } catch (e) {
+                  return Promise.resolve({ error: `inlineImages are not supported by this Thunderbird version (needs the JS MessageSend of TB 128+): ${e}` });
+                }
+                const embeddedAttachments = [];
+                for (const { cid, desc } of embeddedImages) {
+                  const [att] = descsToMsgAttachments([desc]);
+                  if (!att) {
+                    return Promise.resolve({ error: `inlineImages: could not prepare cid:${cid}` });
+                  }
+                  att.contentId = cid;
+                  embeddedAttachments.push(att);
+                }
+                embeddedMsgSend._gatherEmbeddedAttachments = () => ({ embeddedAttachments, embeddedObjects: [] });
               }
 
               const mode = deliverMode ?? Ci.nsIMsgCompDeliverMode.Now;
@@ -3316,7 +3590,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 }, SEND_TIMEOUT_MS, Ci.nsITimer.TYPE_ONE_SHOT);
 
                 try {
-                  const msgSend = Cc["@mozilla.org/messengercompose/send;1"]
+                  const msgSend = embeddedMsgSend || Cc["@mozilla.org/messengercompose/send;1"]
                     .createInstance(Ci.nsIMsgSend);
 
                   // Populate sender fields from identity (normally done by compose window)
@@ -6754,7 +7028,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
              * 2. Encode non-ASCII as HTML entities - compose window has charset issues
              *    with emojis/unicode even with <meta charset="UTF-8">
              */
-            function composeMail(to, subject, body, cc, bcc, isHtml, from, attachments, skipReview) {
+            function composeMail(to, subject, body, cc, bcc, isHtml, from, attachments, skipReview, inlineImages) {
               try {
                 if (skipReview && isSkipReviewBlocked()) {
                   return { error: "User preference blocks skipReview. Retry with skipReview: false (or omitted) to open the review window instead." };
@@ -6792,6 +7066,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 }
 
                 const { descs: fileDescs, failed: failedPaths } = filePathsToAttachDescs(attachments);
+                const inline = resolveOutboundInlineImages(inlineImages, body, isHtml === true, fileDescs);
+                if (inline.error) return { error: inline.error };
 
                 if (skipReview) {
                   // Direct send bypasses the compose window, so the identity
@@ -6799,7 +7075,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   // must NOT get it -- Thunderbird adds it when the window
                   // opens, and doing both would duplicate it.
                   composeFields.body = buildBodyWithSignature(body, msgComposeParams.identity, useHtml, isHtml);
-                  return sendMessageDirectly(composeFields, msgComposeParams.identity, fileDescs, null, Ci.nsIMsgCompType.New, Ci.nsIMsgCompDeliverMode.Now, useHtml ? "text/html" : "text/plain").then(result => {
+                  return sendMessageDirectly(composeFields, msgComposeParams.identity, fileDescs, null, Ci.nsIMsgCompType.New, Ci.nsIMsgCompDeliverMode.Now, useHtml ? "text/html" : "text/plain", null, inline.embedded).then(result => {
                     if (result.success) {
                       let msg = "Message sent";
                       if (failedPaths.length > 0) msg += ` (failed to attach: ${failedPaths.join(", ")})`;
@@ -6819,6 +7095,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 // exactly like the direct-send path (sendMessageDirectly).
                 for (const att of descsToMsgAttachments(fileDescs)) {
                   composeFields.addAttachment(att);
+                }
+                // The review window's editor embeds data: images as cid parts
+                // on send/save, so inline images go in as data: URLs here.
+                if (inline.embedded.length > 0) {
+                  composeFields.body = inlineImagesAsDataUrls(composeFields.body, inline.embedded);
                 }
 
                 const msgComposeService = Cc["@mozilla.org/messengercompose;1"]
@@ -6846,7 +7127,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
              * correction of a saved draft would accumulate one more copy in the
              * Drafts folder, and the caller has no way to remove the stale one.
              */
-            function saveDraft(to, subject, body, cc, bcc, isHtml, from, attachments, replaceMessageId, replaceFolderPath) {
+            function saveDraft(to, subject, body, cc, bcc, isHtml, from, attachments, replaceMessageId, replaceFolderPath, inlineImages) {
               try {
                 const msgComposeParams = Cc["@mozilla.org/messengercompose/composeparams;1"]
                   .createInstance(Ci.nsIMsgComposeParams);
@@ -6892,6 +7173,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 composeFields.body = buildBodyWithSignature(body, msgComposeParams.identity, useHtml, isHtml);
 
                 const { descs: fileDescs, failed: failedPaths } = filePathsToAttachDescs(attachments);
+                const inline = resolveOutboundInlineImages(inlineImages, body, isHtml === true, fileDescs);
+                if (inline.error) return { error: inline.error };
 
                 return sendMessageDirectly(
                   composeFields,
@@ -6901,7 +7184,8 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   msgComposeParams.type,
                   Ci.nsIMsgCompDeliverMode.SaveAsDraft,
                   useHtml ? "text/html" : "text/plain",
-                  msgToReplace
+                  msgToReplace,
+                  inline.embedded
                 ).then(result => {
                   if (result.success && msgToReplace) {
                     // Local build: on IMAP the msgToReplace hand-off saves the new
@@ -6920,6 +7204,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   }
                   if (result.success) {
                     let msg = msgToReplace ? "Draft replaced" : "Draft saved";
+                    if (inline.embedded.length > 0) msg += ` with ${inline.embedded.length} inline image(s)`;
                     if (failedPaths.length > 0) msg += ` (failed to attach: ${failedPaths.join(", ")})`;
                     result.message = msg;
                   }
@@ -6943,7 +7228,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
              * saveAsDraft runs the same native review flow, then saves the reply
              * to Drafts and closes the window instead of leaving it open.
              */
-	            function replyToMessage(messageId, folderPath, body, replyAll, isHtml, to, cc, bcc, from, attachments, skipReview, saveAsDraft, subject) {
+	            function replyToMessage(messageId, folderPath, body, replyAll, isHtml, to, cc, bcc, from, attachments, skipReview, saveAsDraft, subject, inlineImages) {
 	              return new Promise((resolve) => {
 	                try {
 	                  if (skipReview && saveAsDraft) {
@@ -6989,6 +7274,12 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	                  const { useHtml: replyUseHtml, format: replyFormat } =
 	                    resolveComposeFormat(msgComposeParams.identity, isHtml, compType);
 	                  msgComposeParams.format = replyFormat;
+
+	                  const inline = resolveOutboundInlineImages(inlineImages, body, isHtml === true, fileDescs);
+	                  if (inline.error) {
+	                    resolve({ error: inline.error });
+	                    return;
+	                  }
 
 	                  // Pass through only the fields the caller explicitly provided.
 	                  // Any field left undefined is filled in by Thunderbird's native
@@ -7053,7 +7344,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	                          composeFields.body = `${body || ""}\n\nOn ${dateStr}, ${author} wrote:\n${quotedLines}`;
 	                        }
 
-	                        sendMessageDirectly(composeFields, msgComposeParams.identity, fileDescs, msgURI, compType, Ci.nsIMsgCompDeliverMode.Now, replyUseHtml ? "text/html" : "text/plain").then(result => {
+	                        sendMessageDirectly(composeFields, msgComposeParams.identity, fileDescs, msgURI, compType, Ci.nsIMsgCompDeliverMode.Now, replyUseHtml ? "text/html" : "text/plain", null, inline.embedded).then(result => {
 	                          if (result.success) {
 	                            let repliedDisposition = null;
 	                            try {
@@ -7079,7 +7370,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 	                    msgURI,
 	                    compType,
 	                    msgComposeParams.identity,
-	                    body,
+	                    inlineImagesAsDataUrls(body, inline.embedded),
 	                    isHtml,
 	                    reviewTo,
 	                    reviewCc,
@@ -8644,11 +8935,11 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 case "updateTask":
                   return await updateTask(args.taskId, args.calendarId, args.title, args.dueDate, args.description, args.completed, args.percentComplete, args.priority);
                 case "sendMail":
-                  return await composeMail(args.to, args.subject, args.body, args.cc, args.bcc, args.isHtml, args.from, args.attachments, args.skipReview);
+                  return await composeMail(args.to, args.subject, args.body, args.cc, args.bcc, args.isHtml, args.from, args.attachments, args.skipReview, args.inlineImages);
                 case "saveDraft":
-                  return await saveDraft(args.to, args.subject, args.body, args.cc, args.bcc, args.isHtml, args.from, args.attachments, args.replaceMessageId, args.replaceFolderPath);
+                  return await saveDraft(args.to, args.subject, args.body, args.cc, args.bcc, args.isHtml, args.from, args.attachments, args.replaceMessageId, args.replaceFolderPath, args.inlineImages);
                 case "replyToMessage":
-                  return await replyToMessage(args.messageId, args.folderPath, args.body, args.replyAll, args.isHtml, args.to, args.cc, args.bcc, args.from, args.attachments, args.skipReview, args.saveAsDraft, args.subject);
+                  return await replyToMessage(args.messageId, args.folderPath, args.body, args.replyAll, args.isHtml, args.to, args.cc, args.bcc, args.from, args.attachments, args.skipReview, args.saveAsDraft, args.subject, args.inlineImages);
                 case "forwardMessage":
                   return await forwardMessage(args.messageId, args.folderPath, args.to, args.body, args.isHtml, args.cc, args.bcc, args.from, args.attachments, args.skipReview);
                 case "getRecentMessages":
