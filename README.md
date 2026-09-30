@@ -1,6 +1,6 @@
 # Thunderbird MCP
 
-> **Wersja zmodyfikowana (0.7.5.4) — Jakub Cyrklaf.** Oparta na oryginale
+> **Wersja zmodyfikowana (0.8.0.1) — Jakub Cyrklaf.** Oparta na oryginale
 > [TKasperczyk/thunderbird-mcp](https://github.com/TKasperczyk/thunderbird-mcp) (Tomasz Kasperczyk, MIT).
 > Lista zmian i procedura aktualizacji: [`MODIFICATIONS.md`](MODIFICATIONS.md).
 
