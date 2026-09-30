@@ -3180,10 +3180,10 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                     if ((tmpDir.permissions & 0o077) !== 0) {
                       throw new Error("thunderbird-mcp tmp directory has group/world permissions — refusing to write connection info");
                     }
-                  } catch (e) {
-                    if (e && e.message && e.message.startsWith("thunderbird-mcp tmp directory")) throw e;
-                    // ignore: permissions accessor unsupported on this platform
                   }
+                } catch (e) {
+                  if (e && e.message && e.message.startsWith("thunderbird-mcp tmp directory")) throw e;
+                  // ignore: permissions accessor unsupported on this platform
                 }
               }
               const connFile = tmpDir.clone();
@@ -8277,12 +8277,13 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
                 const { useHtml, format } = resolveComposeFormat(msgComposeParams.identity, isHtml, msgComposeParams.type);
                 msgComposeParams.format = format;
+
+                const { descs: fileDescs } = filePathsToAttachDescs(attachments);
+
                 // saveDraft always builds the message directly, so Thunderbird's
                 // compose window never runs and never inserts the signature --
                 // we have to append it ourselves.
                 composeFields.body = buildBodyWithSignature(body, msgComposeParams.identity, useHtml, isHtml);
-
-                const { descs: fileDescs } = filePathsToAttachDescs(attachments);
                 const inline = resolveOutboundInlineImages(inlineImages, body, isHtml === true, fileDescs);
                 if (inline.error) return { error: inline.error };
 
