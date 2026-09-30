@@ -737,25 +737,7 @@ const MAX_BASE64_SIZE = 25 * 1024 * 1024; // 25 MB limit for inline base64 data 
 const MAX_FILE_PATH_ATTACHMENT_BYTES = 50 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES = 50 * 1024 * 1024;
 const MAX_ATTACHMENTS_PER_MESSAGE = 20;
-// END OUTBOUND ATTACHMENT LIMITS
-// BEGIN OUTBOUND INLINE IMAGE HELPERS
-// Local build: images embedded in the HTML body of saveDraft / sendMail /
-// replyToMessage as multipart/related parts with a Content-ID, referenced from
-// the body as <img src="cid:...">. These helpers are pure (no XPCOM) so the
-// planning and body rewriting can be tested outside Thunderbird.
-const OUTBOUND_INLINE_IMAGE_TYPES_BY_EXT = {
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  gif: "image/gif",
-  webp: "image/webp",
-  bmp: "image/bmp",
-  svg: "image/svg+xml",
-};
-// RFC 5322 atext plus "." and "@": what a msg-id / Content-ID may carry
-// without quoting. Rules out spaces, quotes and angle brackets, so a cid can
-// never break out of the src attribute or the Content-ID header.
-const OUTBOUND_CONTENT_ID_PATTERN = /^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~.@]{1,200}$/;
+// Shape of the inlineImages parameter of sendMail / saveDraft / replyToMessage.
 const OUTBOUND_INLINE_IMAGES_SCHEMA = {
   type: "array",
   maxItems: MAX_ATTACHMENTS_PER_MESSAGE,
@@ -778,6 +760,25 @@ const OUTBOUND_INLINE_IMAGES_SCHEMA = {
     additionalProperties: false,
   },
 };
+// END OUTBOUND ATTACHMENT LIMITS
+// BEGIN OUTBOUND INLINE IMAGE HELPERS
+// Local build: images embedded in the HTML body of saveDraft / sendMail /
+// replyToMessage as multipart/related parts with a Content-ID, referenced from
+// the body as <img src="cid:...">. These helpers are pure (no XPCOM) so the
+// planning and body rewriting can be tested outside Thunderbird.
+const OUTBOUND_INLINE_IMAGE_TYPES_BY_EXT = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  bmp: "image/bmp",
+  svg: "image/svg+xml",
+};
+// RFC 5322 atext plus "." and "@": what a msg-id / Content-ID may carry
+// without quoting. Rules out spaces, quotes and angle brackets, so a cid can
+// never break out of the src attribute or the Content-ID header.
+const OUTBOUND_CONTENT_ID_PATTERN = /^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~.@]{1,200}$/;
 
 function normalizeOutboundContentId(raw) {
   let cid = String(raw ?? "").trim();

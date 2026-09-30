@@ -12,6 +12,13 @@ const vm = require("node:vm");
 const API_PATH = path.join(__dirname, "..", "extension", "mcp_server", "api.js");
 const source = fs.readFileSync(API_PATH, "utf8");
 
+function limitsSnippet() {
+  const start = source.indexOf("// BEGIN OUTBOUND ATTACHMENT LIMITS");
+  const end = source.indexOf("// END OUTBOUND ATTACHMENT LIMITS");
+  assert.ok(start >= 0 && end > start, "outbound attachment limit markers missing");
+  return source.slice(start, end);
+}
+
 function loadHelpers() {
   const startMarker = "// BEGIN OUTBOUND INLINE IMAGE HELPERS";
   const endMarker = "// END OUTBOUND INLINE IMAGE HELPERS";
@@ -21,7 +28,7 @@ function loadHelpers() {
   const sandbox = {};
   vm.createContext(sandbox);
   vm.runInContext(
-    `const MAX_ATTACHMENTS_PER_MESSAGE = 20;
+    `${limitsSnippet()}
 ${source.slice(start, end)}
 this.helpers = {
   normalizeOutboundContentId,

@@ -13,6 +13,7 @@ Ta kopia zawiera zmiany wprowadzone przez Jakuba Cyrklafa.
   - Poprawka Windows → już zgłoszona przez kogoś innego jako PR [#206](https://github.com/TKasperczyk/thunderbird-mcp/pull/206) (nie dublujemy).
   - Podpis przy `saveDraft`/`sendMail` → cudzy PR [#168](https://github.com/TKasperczyk/thunderbird-mcp/pull/168) (autor: mwatola-glitch), wciągnięty tutaj z jedną zmianą (bez separatora „-- ”).
   - Cudze PR-y wciągnięte bez zmian: [#186](https://github.com/TKasperczyk/thunderbird-mcp/pull/186) (`getMessage` + `bodyFormat`), [#194](https://github.com/TKasperczyk/thunderbird-mcp/pull/194) (`saveDraft` podmienia szkic), [#174](https://github.com/TKasperczyk/thunderbird-mcp/pull/174) (`ccList` w `getRecentMessages`).
+  - `inlineImages` → PR [#230](https://github.com/TKasperczyk/thunderbird-mcp/pull/230) (gałąź `feat/inline-images` w forku, na bazie upstream 0.8.0 — bez `saveAsDraft`/`subject`/`msgToReplace`, których upstream nie ma).
   - Gdy wszystkie zostaną przyjęte i wydane, można wrócić do oryginalnej wtyczki z auto-aktualizacją (zainstalować XPI autora; zmienią się nazwa i wersja, ID zostaje to samo).
 
 ## Lista zmian
